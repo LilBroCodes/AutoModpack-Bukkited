@@ -40,7 +40,6 @@ public class AutoModpackServer {
         hostModpackDir.toFile().mkdirs();
         hostContentModpackDir.toFile().mkdirs();
         privateDir.toFile().mkdirs();
-        modpacksDir.toFile().mkdirs();
 
         serverConfigFile = automodpackDir.resolve("automodpack-server.json");
         serverCoreConfigFile = automodpackDir.resolve("automodpack-core.json");
