@@ -9,7 +9,7 @@ public final class AutoModpack extends JavaPlugin {
     public static final String PLUGIN_ID = "automodpack";
     public static String PLUGIN_VERSION;
     
-    private AutoModpackServer server;
+    public AutoModpackServer server;
     private HandshakeManager handshakeManager;
 
     @Override

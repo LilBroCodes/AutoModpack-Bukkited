@@ -11,21 +11,28 @@ import io.netty.buffer.Unpooled;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.lilbrocodes.automodpack.AutoModpack;
+import org.lilbrocodes.automodpack.AutoModpackServer;
+import pl.skidam.automodpack_core.auth.Secrets;
+import pl.skidam.automodpack_core.auth.SecretsStore;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.List;
 
+import static pl.skidam.automodpack_core.GlobalVariables.*;
+import static pl.skidam.automodpack_core.GlobalVariables.serverConfig;
+
 public class HandshakeManager {
-    private final Plugin plugin;
+    private final AutoModpack plugin;
     private final ProtocolManager protocolManager;
     private final Gson gson = new Gson();
 
     private static final String HANDSHAKE_CHANNEL = "automodpack:handshake";
+    private static final String DATA_CHANNEL = "automodpack:data";
     private static final List<String> ACCEPTED_LOADERS = Arrays.asList("fabric", "forge", "neoforge");
 
-    public HandshakeManager(Plugin plugin) {
+    public HandshakeManager(AutoModpack plugin) {
         this.plugin = plugin;
         this.protocolManager = ProtocolLibrary.getProtocolManager();
         registerListeners();
@@ -94,6 +101,70 @@ public class HandshakeManager {
 
     }
 
+    private void sendDataPacket(PacketEvent event) {
+        try {
+            PacketContainer packet = protocolManager.createPacket(PacketType.Login.Server.CUSTOM_PAYLOAD);
+
+            if (!plugin.server.isRunning()) {
+                LOGGER.info("Host server is not running. Modpack will not be sent to {}", event.getPlayer().getName());
+                return;
+            }
+
+            if (modpackExecutor.isGenerating()) {
+                disconnectPlayer(event.getPlayer(), "AutoModpack is generating modpack. Please wait a moment and try again.");
+                return;
+            }
+
+            Secrets.Secret secret = Secrets.generateSecret();
+//            SecretsStore.saveHostSecret(event.getPlayer().getUniqueId().toString(), secret);
+
+            String addressToSend = serverConfig.addressToSend;
+            int portToSend = serverConfig.portToSend;
+            boolean requiresMagic = serverConfig.bindPort == -1;
+
+            LOGGER.info("Sending {} modpack host address: {}:{}", event.getPlayer().getName(), addressToSend, portToSend);
+            DataPacket dataPacket = new DataPacket(addressToSend, portToSend, serverConfig.modpackName, secret, serverConfig.requireAutoModpackOnClient, requiresMagic);
+
+            String packetContentJson = dataPacket.toJson();
+
+            Object handle = packet.getHandle();
+
+            Class<?> minecraftKeyClass = Class.forName("net.minecraft.resources.MinecraftKey");
+            Object channelKey = minecraftKeyClass.getConstructor(String.class).newInstance(HANDSHAKE_CHANNEL);
+
+            ByteBuf byteBuf = Unpooled.buffer();
+            Class<?> serializerClass = Class.forName("net.minecraft.network.PacketDataSerializer");
+            Object serializer = serializerClass.getConstructor(ByteBuf.class).newInstance(byteBuf);
+
+            Method writeUtf = null;
+            for (Method m : serializerClass.getMethods()) {
+                if (m.getParameterCount() == 1
+                        && m.getParameterTypes()[0] == String.class
+                        && m.getName().equals("a")) {
+                    writeUtf = m;
+                    break;
+                }
+            }
+            if (writeUtf == null) throw new IllegalStateException("Could not find writeUtf method");
+
+            writeUtf.invoke(serializer, packetContentJson);
+
+            for (Field field : handle.getClass().getDeclaredFields()) {
+                field.setAccessible(true);
+                if (minecraftKeyClass.isAssignableFrom(field.getType())) {
+                    field.set(handle, channelKey);
+                } else if (serializerClass.isAssignableFrom(field.getType())) {
+                    field.set(handle, serializer);
+                }
+            }
+
+            protocolManager.sendServerPacket(event.getPlayer(), packet);
+        } catch (Exception e) {
+            plugin.getLogger().severe("Failed to send data packet: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
     private void sendHandshakePacket(Player player) {
         try {
             PacketContainer packet = protocolManager.createPacket(PacketType.Login.Server.CUSTOM_PAYLOAD);
@@ -135,7 +206,7 @@ public class HandshakeManager {
             }
 
             protocolManager.sendServerPacket(player, packet);
-            plugin.getLogger().info("[AutoModpack] Sent handshake packet to " + player.getName());
+            plugin.getLogger().info("Sent handshake packet to " + player.getName());
         } catch (Exception e) {
             plugin.getLogger().severe("Failed to send handshake: " + e.getMessage());
             e.printStackTrace();
@@ -154,7 +225,8 @@ public class HandshakeManager {
                 return;
             }
 
-            plugin.getLogger().info("[AutoModpack] Handshake passed from " + event.getPlayer().getName());
+            plugin.getLogger().info("Handshake passed from " + event.getPlayer().getName());
+            sendDataPacket(event);
 
         } catch (Exception e) {
             plugin.getLogger().severe("Error parsing handshake response: " + e.getMessage());
@@ -171,7 +243,7 @@ public class HandshakeManager {
 
             plugin.getServer().getScheduler().runTask(plugin, () -> player.kickPlayer(reason));
 
-            plugin.getLogger().info("[AutoModpack] Kicked " + player.getName() + ": " + reason);
+            plugin.getLogger().info("Kicked " + player.getName() + ": " + reason);
         } catch (Exception e) {
             plugin.getLogger().severe("Failed to kick player: " + e.getMessage());
             e.printStackTrace();
@@ -194,4 +266,33 @@ public class HandshakeManager {
             return gson.fromJson(json, HandshakePacket.class);
         }
     }
+
+    public class DataPacket {
+        public String address;
+        public int port;
+        public String modpackName;
+        public Secrets.Secret secret;
+        public boolean modRequired;
+        public boolean requiresMagic;
+
+        public DataPacket(String address, int port, String modpackName, Secrets.Secret secret, boolean modRequired, boolean requiresMagic) {
+            this.address = address;
+            this.port = port;
+            this.modpackName = modpackName;
+            this.secret = secret;
+            this.modRequired = modRequired;
+            this.requiresMagic = requiresMagic;
+        }
+
+        public String toJson() {
+            Gson gson = new Gson();
+            return gson.toJson(this);
+        }
+
+        public static DataPacket fromJson(String json) {
+            Gson gson = new Gson();
+            return gson.fromJson(json, DataPacket.class);
+        }
+    }
+
 }
