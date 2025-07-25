@@ -52,7 +52,7 @@ public class AutoModpackServer {
         if (serverConfig == null) {
             serverConfig = new Jsons.ServerConfigFieldsV2();
             serverConfig.DO_NOT_CHANGE_IT = 2;
-            serverConfig.modpackName = "BukkitModpack";
+            serverConfig.modpackName = "";
             serverConfig.modpackHost = true;
             serverConfig.generateModpackOnStart = true;
             serverConfig.bindPort = 25566;
@@ -135,7 +135,6 @@ public class AutoModpackServer {
             LOGGER.info("AutoModpack server stopped");
             isRunning = false;
 
-            // Stop the modpack executor
             if (modpackExecutor != null) {
                 modpackExecutor.stop();
                 modpackExecutor = null;

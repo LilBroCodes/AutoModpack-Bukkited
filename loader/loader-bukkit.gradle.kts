@@ -24,10 +24,15 @@ repositories {
         name = "jitpack"
         url = uri("https://jitpack.io")
     }
+    maven {
+        name = "dmulloy2-repo"
+        url = uri("https://repo.dmulloy2.net/repository/public/")
+    }
 }
 
 dependencies {
     compileOnly("org.spigotmc:spigot-api:1.20.1-R0.1-SNAPSHOT")
+    compileOnly("com.comphenix.protocol:ProtocolLib:5.1.0")
 
     implementation("com.github.LilBroCodes:Commander:1.51")
     implementation(project(":core"))
