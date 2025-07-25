@@ -1,0 +1,14 @@
+name: Automodpack
+version: '${version}'
+main: org.lilbrocodes.automodpack.AutoModpack
+api-version: '1.20.1'
+prefix: AutoModpack
+load: STARTUP
+authors: [ LilBroCodes ]
+commands:
+  automodpack:
+    description: Main command for AutoModpack.
+    usage: /automodpack <info>
+    aliases: [ "amp" ]
+    permission: automodpack.amp
+    permission-message: You do not have permission to execute this command.
