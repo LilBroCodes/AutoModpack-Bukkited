@@ -8,7 +8,29 @@ authors: [ LilBroCodes ]
 commands:
   automodpack:
     description: Main command for AutoModpack.
-    usage: /automodpack <info>
+    usage: /automodpack <info|generate|host>
     aliases: [ "amp" ]
     permission: automodpack.amp
     permission-message: You do not have permission to execute this command.
+permissions:
+  automodpack.amp:
+    description: Allows access to basic AutoModpack commands
+    default: op
+  automodpack.generate:
+    description: Allows generating a modpack
+    default: op
+  automodpack.host:
+    description: Allows managing the modpack host
+    default: op
+  automodpack.host.start:
+    description: Allows starting the modpack host
+    default: op
+  automodpack.host.stop:
+    description: Allows stopping the modpack host
+    default: op
+  automodpack.host.restart:
+    description: Allows restarting the modpack host
+    default: op
+  automodpack.host.fingerprint:
+    description: Allows viewing the certificate fingerprint
+    default: op

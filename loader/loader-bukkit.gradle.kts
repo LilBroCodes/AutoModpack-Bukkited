@@ -31,6 +31,11 @@ dependencies {
 
     implementation("com.github.LilBroCodes:Commander:1.51")
     implementation(project(":core"))
+    
+    // Add missing dependencies
+    implementation("org.apache.logging.log4j:log4j-api:2.20.0")
+    implementation("org.apache.logging.log4j:log4j-core:2.20.0")
+    implementation("io.netty:netty-all:4.1.100.Final")
 }
 
 val targetJavaVersion = 17
