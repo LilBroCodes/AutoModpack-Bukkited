@@ -1,7 +1,7 @@
 name: Automodpack
 version: '${version}'
 main: org.lilbrocodes.automodpack.AutoModpack
-api-version: '1.20.1'
+api-version: '1.13'
 prefix: AutoModpack
 load: STARTUP
 authors: [ LilBroCodes ]
