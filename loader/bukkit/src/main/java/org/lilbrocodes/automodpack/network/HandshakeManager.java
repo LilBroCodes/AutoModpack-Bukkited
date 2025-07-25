@@ -3,10 +3,7 @@ package org.lilbrocodes.automodpack.network;
 import com.comphenix.protocol.PacketType;
 import com.comphenix.protocol.ProtocolLibrary;
 import com.comphenix.protocol.ProtocolManager;
-import com.comphenix.protocol.events.ListenerPriority;
-import com.comphenix.protocol.events.PacketAdapter;
-import com.comphenix.protocol.events.PacketContainer;
-import com.comphenix.protocol.events.PacketEvent;
+import com.comphenix.protocol.events.*;
 import com.comphenix.protocol.wrappers.WrappedChatComponent;
 import com.google.gson.Gson;
 import io.netty.buffer.ByteBuf;
@@ -17,8 +14,7 @@ import org.lilbrocodes.automodpack.AutoModpack;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 public class HandshakeManager {
@@ -27,25 +23,21 @@ public class HandshakeManager {
     private final Gson gson = new Gson();
 
     private static final String HANDSHAKE_CHANNEL = "automodpack:handshake";
-    private static final String DATA_CHANNEL = "automodpack:data";
-    
+    private static final List<String> ACCEPTED_LOADERS = Arrays.asList("fabric", "forge", "neoforge");
+
     public HandshakeManager(Plugin plugin) {
         this.plugin = plugin;
         this.protocolManager = ProtocolLibrary.getProtocolManager();
-        registerHandshakePackets();
+        registerListeners();
     }
 
-    private void registerHandshakePackets() {
+    private void registerListeners() {
         protocolManager.addPacketListener(new PacketAdapter(plugin, ListenerPriority.HIGHEST,
                 PacketType.Login.Client.START) {
             @Override
             public void onPacketReceiving(PacketEvent event) {
-                plugin.getLogger().info("Client login detected, preparing handshake");
-                plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-                    if (event.getPlayer() != null && event.getPlayer().isOnline()) {
-                        sendHandshakePacket(event.getPlayer());
-                    }
-                }, 5L);
+                plugin.getLogger().info("Client login detected: " + event.getPlayer().getName());
+                sendHandshakePacket(event.getPlayer());
             }
         });
 
@@ -53,140 +45,153 @@ public class HandshakeManager {
                 PacketType.Login.Client.CUSTOM_PAYLOAD) {
             @Override
             public void onPacketReceiving(PacketEvent event) {
-                PacketContainer packet = event.getPacket();
-                String channel = packet.getStrings().read(0);
-                
-                if (HANDSHAKE_CHANNEL.equals(channel)) {
-                    plugin.getLogger().info("Received handshake response from client");
-                    handleHandshakeResponse(event);
-                } else if (DATA_CHANNEL.equals(channel)) {
-                    plugin.getLogger().info("Received data response from client");
-                    handleDataResponse(event);
+                try {
+                    Object handle = event.getPacket().getHandle();
+                    Class<?> packetClass = handle.getClass();
+
+                    Class<?> minecraftKeyClass = Class.forName("net.minecraft.resources.MinecraftKey");
+                    Class<?> serializerClass = Class.forName("net.minecraft.network.PacketDataSerializer");
+
+                    Object payloadSerializer = null;
+
+                    for (Field field : packetClass.getDeclaredFields()) {
+                        field.setAccessible(true);
+                        Class<?> type = field.getType();
+                        if (serializerClass.isAssignableFrom(type)) {
+                            payloadSerializer = field.get(handle);
+                        }
+                    }
+
+                    Method readUtf = null;
+                    for (Method m : serializerClass.getMethods()) {
+                        if (m.getParameterCount() == 1
+                                && m.getParameterTypes()[0] == int.class
+                                && m.getName().equals("e")) {
+                            readUtf = m;
+                            break;
+                        }
+                    }
+
+                    if (payloadSerializer == null) {
+                        plugin.getLogger().warning("Packet missing channel or payload!");
+                        return;
+                    }
+
+                    String json = (String) readUtf.invoke(payloadSerializer, Short.MAX_VALUE);
+
+                    plugin.getLogger().info("Received payload JSON: " + json);
+
+                    HandshakePacket packet = HandshakePacket.fromJson(json);
+                    handleHandshakeResponse(event, packet);
+
+                } catch (Exception e) {
+                    plugin.getLogger().severe("Error in login‐query listener: " + e);
+                    e.printStackTrace();
+                    disconnectPlayer(event.getPlayer(), "Invalid handshake response.");
                 }
             }
         });
+
     }
 
     private void sendHandshakePacket(Player player) {
-        plugin.getLogger().info("Preparing to send handshake packet to " + player.getName());
         try {
-            PacketContainer customPayload = protocolManager.createPacket(PacketType.Login.Server.CUSTOM_PAYLOAD);
-            plugin.getLogger().info("Created PacketContainer: " + customPayload);
-
-            Object handle = customPayload.getHandle();
-            plugin.getLogger().info("Packet handle: " + (handle != null ? handle.getClass().getName() : "null"));
+            PacketContainer packet = protocolManager.createPacket(PacketType.Login.Server.CUSTOM_PAYLOAD);
+            Object handle = packet.getHandle();
 
             Class<?> minecraftKeyClass = Class.forName("net.minecraft.resources.MinecraftKey");
-            Object minecraftKey = minecraftKeyClass
-                    .getConstructor(String.class)
-                    .newInstance("automodpack:handshake");
-            plugin.getLogger().info("Created MinecraftKey: " + minecraftKey);
+            Object channelKey = minecraftKeyClass.getConstructor(String.class).newInstance(HANDSHAKE_CHANNEL);
 
-            HandshakePacket handshakePacket = new HandshakePacket(
-                    getAcceptedLoaders(),
+            String json = gson.toJson(new HandshakePacket(
+                    ACCEPTED_LOADERS,
                     AutoModpack.PLUGIN_VERSION,
-                    getMinecraftVersion()
-            );
-            String jsonPayload = gson.toJson(handshakePacket);
-            plugin.getLogger().info("Handshake payload JSON: " + jsonPayload);
+                    plugin.getServer().getBukkitVersion().split("-")[0]
+            ));
 
-            byte[] payloadBytes = jsonPayload.getBytes();
-            ByteBuf byteBuf = Unpooled.wrappedBuffer(payloadBytes);
-
+            ByteBuf byteBuf = Unpooled.buffer();
             Class<?> serializerClass = Class.forName("net.minecraft.network.PacketDataSerializer");
-            Object packetDataSerializer = serializerClass
-                    .getConstructor(ByteBuf.class)
-                    .newInstance(byteBuf);
-            plugin.getLogger().info("Created PacketDataSerializer: " + packetDataSerializer);
+            Object serializer = serializerClass.getConstructor(ByteBuf.class).newInstance(byteBuf);
 
-            Field channelField = handle.getClass().getDeclaredField("c");
-            channelField.setAccessible(true);
-            channelField.set(handle, minecraftKey);
-            plugin.getLogger().info("Set MinecraftKey channel field");
+            Method writeUtf = null;
+            for (Method m : serializerClass.getMethods()) {
+                if (m.getParameterCount() == 1
+                        && m.getParameterTypes()[0] == String.class
+                        && m.getName().equals("a")) {
+                    writeUtf = m;
+                    break;
+                }
+            }
+            if (writeUtf == null) throw new IllegalStateException("Could not find writeUtf method");
 
-            Field dataField = handle.getClass().getDeclaredField("d");
-            dataField.setAccessible(true);
-            dataField.set(handle, packetDataSerializer);
-            plugin.getLogger().info("Set PacketDataSerializer payload field");
+            writeUtf.invoke(serializer, json);
 
-            protocolManager.sendServerPacket(player, customPayload);
-            plugin.getLogger().info("Sent handshake packet to " + player.getName());
+            for (Field field : handle.getClass().getDeclaredFields()) {
+                field.setAccessible(true);
+                if (minecraftKeyClass.isAssignableFrom(field.getType())) {
+                    field.set(handle, channelKey);
+                } else if (serializerClass.isAssignableFrom(field.getType())) {
+                    field.set(handle, serializer);
+                }
+            }
 
+            protocolManager.sendServerPacket(player, packet);
+            plugin.getLogger().info("[AutoModpack] Sent handshake packet to " + player.getName());
         } catch (Exception e) {
-            plugin.getLogger().severe("Failed to send handshake packet: " + e.getMessage());
+            plugin.getLogger().severe("Failed to send handshake: " + e.getMessage());
             e.printStackTrace();
         }
     }
 
-    private void handleHandshakeResponse(PacketEvent event) {
+    private void handleHandshakeResponse(PacketEvent event, HandshakePacket readPacket) {
         try {
-            PacketContainer packet = event.getPacket();
-            byte[] data = packet.getByteArrays().read(0);
-            String jsonResponse = new String(data);
-            
-            HandshakePacket clientHandshakePacket = gson.fromJson(jsonResponse, HandshakePacket.class);
-            Player player = event.getPlayer();
-            
-            plugin.getLogger().info("Client handshake from " + player.getName() + ": " + 
-                    "Loader: " + clientHandshakePacket.loaders.get(0) + ", " +
-                    "Version: " + clientHandshakePacket.amVersion);
-            
-            if (!isCompatibleVersion(clientHandshakePacket.amVersion)) {
-                String reason = "AutoModpack version mismatch! Please install " +
-                        AutoModpack.PLUGIN_VERSION + " to play on this server.";
-                disconnectPlayer(player, reason);
+
+            String clientVersion = readPacket.amVersion;
+
+            if (!AutoModpack.PLUGIN_VERSION.equals(clientVersion)) {
+                String reason = "AutoModpack version mismatch! Server: " + AutoModpack.PLUGIN_VERSION +
+                        ", Client: " + clientVersion;
+                disconnectPlayer(event.getPlayer(), reason);
                 return;
             }
-            
-            sendDataPacket(player);
-            
+
+            plugin.getLogger().info("[AutoModpack] Handshake passed from " + event.getPlayer().getName());
+
         } catch (Exception e) {
-            plugin.getLogger().severe("Error handling handshake response: " + e.getMessage());
+            plugin.getLogger().severe("Error parsing handshake response: " + e.getMessage());
+            e.printStackTrace();
+            disconnectPlayer(event.getPlayer(), "Invalid handshake response.");
+        }
+    }
+
+    private void disconnectPlayer(Player player, String reason) {
+        try {
+            PacketContainer kickPacket = protocolManager.createPacket(PacketType.Login.Server.DISCONNECT);
+            kickPacket.getChatComponents().write(0, WrappedChatComponent.fromText(reason));
+            protocolManager.sendServerPacket(player, kickPacket);
+
+            plugin.getServer().getScheduler().runTask(plugin, () -> player.kickPlayer(reason));
+
+            plugin.getLogger().info("[AutoModpack] Kicked " + player.getName() + ": " + reason);
+        } catch (Exception e) {
+            plugin.getLogger().severe("Failed to kick player: " + e.getMessage());
             e.printStackTrace();
         }
     }
-    
-    private void handleDataResponse(PacketEvent event) {
-        plugin.getLogger().info("Processed data response from " + event.getPlayer().getName());
-    }
-    
-    private void sendDataPacket(Player player) {
-        // TODO
-    }
-    
-    private void disconnectPlayer(Player player, String reason) {
-        PacketContainer disconnect = protocolManager.createPacket(PacketType.Login.Server.DISCONNECT);
-        disconnect.getChatComponents().write(0, WrappedChatComponent.fromText(reason));
-        protocolManager.sendServerPacket(player, disconnect);
 
-        plugin.getServer().getScheduler().runTask(plugin, () -> player.kickPlayer(reason));
-    }
-    
-    private boolean isCompatibleVersion(String clientVersion) {
-        return clientVersion.equals(AutoModpack.PLUGIN_VERSION);
-    }
-    
-    private List<String> getAcceptedLoaders() {
-        List<String> loaders = new ArrayList<>();
-        loaders.add("fabric");
-        loaders.add("forge");
-        loaders.add("neoforge");
-        return loaders;
-    }
-    
-    private String getMinecraftVersion() {
-        return plugin.getServer().getBukkitVersion().split("-")[0];
-    }
-    
     private static class HandshakePacket {
         public List<String> loaders;
         public String amVersion;
         public String mcVersion;
-        
+
         public HandshakePacket(List<String> loaders, String amVersion, String mcVersion) {
             this.loaders = loaders;
             this.amVersion = amVersion;
             this.mcVersion = mcVersion;
+        }
+
+        public static HandshakePacket fromJson(String json) {
+            Gson gson = new Gson();
+            return gson.fromJson(json, HandshakePacket.class);
         }
     }
 }
