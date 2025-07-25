@@ -4,14 +4,15 @@ import com.comphenix.protocol.PacketType;
 import com.comphenix.protocol.ProtocolLibrary;
 import com.comphenix.protocol.ProtocolManager;
 import com.comphenix.protocol.events.*;
+import com.comphenix.protocol.injector.netty.channel.NettyChannelInjector;
 import com.comphenix.protocol.wrappers.WrappedChatComponent;
 import com.google.gson.Gson;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import org.bukkit.Bukkit;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.entity.Player;
-import org.bukkit.plugin.Plugin;
 import org.lilbrocodes.automodpack.AutoModpack;
-import org.lilbrocodes.automodpack.AutoModpackServer;
 import pl.skidam.automodpack_core.auth.Secrets;
 import pl.skidam.automodpack_core.auth.SecretsStore;
 
@@ -44,7 +45,7 @@ public class HandshakeManager {
             @Override
             public void onPacketReceiving(PacketEvent event) {
                 plugin.getLogger().info("Client login detected: " + event.getPlayer().getName());
-                sendHandshakePacket(event.getPlayer());
+                sendHandshakePacket(event);
             }
         });
 
@@ -88,6 +89,12 @@ public class HandshakeManager {
 
                     plugin.getLogger().info("Received payload JSON: " + json);
 
+                    if (json.equals("false")) {
+                        plugin.getLogger().info("Payload JSON is info packet");
+                        voidEvent(event);
+                        return;
+                    }
+
                     HandshakePacket packet = HandshakePacket.fromJson(json);
                     handleHandshakeResponse(event, packet);
 
@@ -103,6 +110,7 @@ public class HandshakeManager {
 
     private void sendDataPacket(PacketEvent event) {
         try {
+            voidEvent(event);
             PacketContainer packet = protocolManager.createPacket(PacketType.Login.Server.CUSTOM_PAYLOAD);
 
             if (!plugin.server.isRunning()) {
@@ -115,12 +123,29 @@ public class HandshakeManager {
                 return;
             }
 
+            NettyChannelInjector source = (NettyChannelInjector) event.getSource();
+
+            String playerName = null;
+            for (Field field : source.getClass().getDeclaredFields()) {
+                field.setAccessible(true);
+                Class<?> type = field.getType();
+                if (String.class.isAssignableFrom(type)) {
+                    playerName = (String) field.get(source);
+                }
+            }
+            if (playerName == null) {
+                disconnectPlayer(event.getPlayer(), "Failed to get player name! This is a bug and shouldn't happen, please report it on the github!");
+                return;
+            }
+
+            OfflinePlayer player = Bukkit.getOfflinePlayer(playerName);
             Secrets.Secret secret = Secrets.generateSecret();
-//            SecretsStore.saveHostSecret(event.getPlayer().getUniqueId().toString(), secret);
+            SecretsStore.saveHostSecret(player.getUniqueId().toString(), secret);
 
             String addressToSend = serverConfig.addressToSend;
             int portToSend = serverConfig.portToSend;
             boolean requiresMagic = serverConfig.bindPort == -1;
+
 
             LOGGER.info("Sending {} modpack host address: {}:{}", event.getPlayer().getName(), addressToSend, portToSend);
             DataPacket dataPacket = new DataPacket(addressToSend, portToSend, serverConfig.modpackName, secret, serverConfig.requireAutoModpackOnClient, requiresMagic);
@@ -130,7 +155,7 @@ public class HandshakeManager {
             Object handle = packet.getHandle();
 
             Class<?> minecraftKeyClass = Class.forName("net.minecraft.resources.MinecraftKey");
-            Object channelKey = minecraftKeyClass.getConstructor(String.class).newInstance(HANDSHAKE_CHANNEL);
+            Object channelKey = minecraftKeyClass.getConstructor(String.class).newInstance(DATA_CHANNEL);
 
             ByteBuf byteBuf = Unpooled.buffer();
             Class<?> serializerClass = Class.forName("net.minecraft.network.PacketDataSerializer");
@@ -150,6 +175,8 @@ public class HandshakeManager {
             writeUtf.invoke(serializer, packetContentJson);
 
             for (Field field : handle.getClass().getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+
                 field.setAccessible(true);
                 if (minecraftKeyClass.isAssignableFrom(field.getType())) {
                     field.set(handle, channelKey);
@@ -165,7 +192,12 @@ public class HandshakeManager {
         }
     }
 
-    private void sendHandshakePacket(Player player) {
+    private void voidEvent(PacketEvent event) {
+        event.setCancelled(true);
+        event.setReadOnly(true);
+    }
+
+    private void sendHandshakePacket(PacketEvent event) {
         try {
             PacketContainer packet = protocolManager.createPacket(PacketType.Login.Server.CUSTOM_PAYLOAD);
             Object handle = packet.getHandle();
@@ -198,6 +230,8 @@ public class HandshakeManager {
 
             for (Field field : handle.getClass().getDeclaredFields()) {
                 field.setAccessible(true);
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+
                 if (minecraftKeyClass.isAssignableFrom(field.getType())) {
                     field.set(handle, channelKey);
                 } else if (serializerClass.isAssignableFrom(field.getType())) {
@@ -205,8 +239,8 @@ public class HandshakeManager {
                 }
             }
 
-            protocolManager.sendServerPacket(player, packet);
-            plugin.getLogger().info("Sent handshake packet to " + player.getName());
+            protocolManager.sendServerPacket(event.getPlayer(), packet);
+            plugin.getLogger().info("Sent handshake packet to " + event.getPlayer().getName());
         } catch (Exception e) {
             plugin.getLogger().severe("Failed to send handshake: " + e.getMessage());
             e.printStackTrace();
@@ -215,7 +249,6 @@ public class HandshakeManager {
 
     private void handleHandshakeResponse(PacketEvent event, HandshakePacket readPacket) {
         try {
-
             String clientVersion = readPacket.amVersion;
 
             if (!AutoModpack.PLUGIN_VERSION.equals(clientVersion)) {
